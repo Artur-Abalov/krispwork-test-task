@@ -1,7 +1,8 @@
 # krispwork-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that exposes one tool, `find_leads`, which scores and ranks
-leads from a bundled CSV against an Ideal Customer Profile (ICP) for Krisp-style targeting.
+An [MCP](https://modelcontextprotocol.io) server that exposes two tools: `find_leads`, which scores and ranks
+leads from a bundled CSV against an Ideal Customer Profile (ICP) for Krisp-style targeting, and `draft_email`,
+which writes a short, deterministic first-touch email for one of those leads (drafts only, nothing is sent).
 
 Built with Spring Boot 4, Spring AI MCP server starter, Kotlin 2 and Java 21. It speaks MCP over **stdio**.
 
@@ -72,7 +73,7 @@ Edit `claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The `find_leads` tool appears in the tools list.
+Restart Claude Desktop. The `find_leads` and `draft_email` tools appear in the tools list.
 
 ### Claude Code
 
@@ -86,7 +87,7 @@ claude mcp add leads -- java -jar /absolute/path/to/krispwork-mcp/build/libs/kri
 npx @modelcontextprotocol/inspector java -jar build/libs/krispwork-mcp-0.0.1-SNAPSHOT.jar
 ```
 
-This opens a browser UI where you can call `find_leads` with arbitrary parameters.
+This opens a browser UI where you can call `find_leads` and `draft_email` with arbitrary parameters.
 
 ### Any other client
 
@@ -156,7 +157,7 @@ real authentication story.
 8. **Client config changes.** Clients switch from `command`/`args` to a `url` entry plus an OAuth flow or
    header configuration.
 
-None of the scoring code changes. `LeadTools`, `LeadService` and `IcpScorer` are transport-agnostic, so the
+None of the scoring or drafting code changes. `LeadTools`, `LeadService`, `IcpScorer` and `EmailDrafter` are transport-agnostic, so the
 move is confined to the build file, `application.properties` and a new security configuration.
 
 ## The `find_leads` tool
@@ -195,6 +196,72 @@ Max score is 12.
 
 Rules and weights live in `src/main/kotlin/com/krispwork/mcp/lead/icp/IcpRules.kt`.
 
+## The `draft_email` tool
+
+Drafts a short first email for **one lead**. It never sends anything and has no side effects.
+
+| Parameter      | Type   | Required | Meaning                                                                                   |
+|----------------|--------|----------|-------------------------------------------------------------------------------------------|
+| `leadId`       | string | yes      | A lead id from `find_leads`, e.g. `L017`                                                  |
+| `senderName`   | string | yes      | Name for the sign-off. Use a real person; a blank value falls back to `The Krisp team`    |
+| `senderTitle`  | string | no       | Job title printed under the name, e.g. `Account Executive, Krisp`. Defaults to `Krisp`    |
+| `personalNote` | string | no       | One verified sentence about the company or person, inserted verbatim after the greeting   |
+| `proofPoint`   | string | no       | One approved proof sentence (a named customer, a sourced number), inserted verbatim after the product sentence |
+
+Example prompts:
+
+- "Draft an intro email to L017 from Ana Petrosyan, Account Executive."
+- "Draft an email to L013 from Ana and add this proof point: <an approved customer quote>."
+- "Find the top 3 leads and draft an email for each, signed by Ana."
+
+### How the text is built
+
+The text is **deterministic**: the same CSV, lead and arguments always produce the same subject and body.
+There is no randomness, no timestamp and no LLM. Every string lives in
+`src/main/kotlin/com/krispwork/mcp/lead/email/EmailTemplates.kt`. The body is assembled from:
+
+1. **Greeting.** `Hi <first name>,` normally; `Hello <company> team,` when the first name is blank or the
+   address is a role mailbox such as `info@`; `Hello,` when the company is blank too.
+2. **Personal note**, if you passed one. The server never invents company facts, so this is the only way a
+   researched detail gets in. Pass something you actually verified.
+3. **Opening.** Chosen first by a whole word in the *company name* (`remote`, `analytics`, `data`), so
+   "Polaris Remote Teams" gets a distributed-team angle and "Northwind Analytics" an analytics one; then by
+   (industry group, role group) where one exists (software sales talks about demos, not candidates); otherwise by
+   the lead's *industry group* (BPO, software, communications, healthcare, recruiting, generic) using the same
+   keyword list as the scorer. Each list has several variants, and the variant is the lead's position among its
+   company's rows (sorted by id), so two colleagues never get the same opening. The headcount appears only in the
+   few variants where the number makes the point (e.g. "With a 1,400-person team, ... every open-plan office or
+   home kitchen shows up"), and those variants are skipped when the headcount is unknown. The country is never
+   printed.
+4. **Product sentence.** One sentence chosen by (industry group, role group), where role groups are support,
+   operations, COO, sales, engineering, IT and remote. Falls back to a role-only line, then a generic one. Each
+   line says what Krisp does (removes noise, echo and other voices, in any app, on both sides) in the reader's
+   terms; there is no second, generic product sentence.
+5. **Assurance line**, per industry, answering the segment's first objection: healthcare leads are told that
+   audio is processed on the device and never sent anywhere. Other industries have none.
+6. **Proof line.** `proofPoint` if you passed one, else the per-industry `proofLines` entry. Empty by default:
+   the server never invents customers or numbers, so fill `proofLines` or pass `proofPoint` only with approved,
+   sourced claims.
+7. **Call to action**, by role, always with the download link `https://krisp.ai/download`. Roles that do not
+   take the calls themselves get a pilot: IT and engineering give it to one team for a week; operations and COO
+   run it with one team for a week, worded per industry (5 to 10 agents in a contact center, one care team in
+   healthcare, a few recruiters in recruiting). Everyone else is asked to try it on their next call. No day of
+   the week is ever mentioned.
+8. **Sign-off** with the sender's name and title. With no title, `Krisp` is printed under the name so a bare
+   first name never signs alone (skipped when the name already contains "Krisp").
+
+The subject is `Call quality at <company>` (or `Call quality on your team's calls` without a company).
+
+The result names the matched groups as `industryAngle` and `titleAngle` so the client can see why that copy
+was chosen, and the LLM is free to rewrite the draft from there.
+
+### Response
+
+- `drafted: true` with `draft { to, subject, body, industryAngle, titleAngle }`, plus the lead's ICP `score`
+  and `icpReasons` for context, or
+- `drafted: false` with a `reason` when the id is unknown or the lead fails an ICP hard gate (missing,
+  invalid or free-mail email; junior/intern/assistant/designer title). Those leads are never drafted for.
+
 ## Using your own leads file
 
 The bundled file is `src/main/resources/leads.csv` (50 sample leads). To score a different file, override the
@@ -222,6 +289,8 @@ Because stdout is the MCP channel, the server never prints to the console. Logs 
   Then look at the newest file in `logs/`.
 - **`java: command not found` in the client**: use the absolute path to the `java` binary in the config.
 - **Wrong Java version**: the jar needs Java 21 or newer.
+- **`draft_email` returns `drafted: false`**: read `reason`. Either the id is not in the CSV or the lead is
+  disqualified by the ICP gates; `find_leads` with the default `minScore` never returns such leads.
 - **Tool returns zero leads**: lower `minScore`, or loosen the country/industry/headcount filters. The
   `filteredOut`, `disqualified` and `belowThreshold` counts in the response show where leads were dropped.
 

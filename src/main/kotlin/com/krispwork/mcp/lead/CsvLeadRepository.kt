@@ -69,11 +69,10 @@ class CsvLeadRepository(
         var inQuotes = false
         var i = 0
         while (i < line.length) {
-            val c = line[i]
-            when {
-                c == '"' && inQuotes && i + 1 < line.length && line[i + 1] == '"' -> { current.append('"'); i++ }
-                c == '"' -> inQuotes = !inQuotes
-                c == ',' && !inQuotes -> { cells += current.toString(); current.setLength(0) }
+            when (val c = line[i]) {
+                '"' if inQuotes && i + 1 < line.length && line[i + 1] == '"' -> { current.append('"'); i++ }
+                '"' -> inQuotes = !inQuotes
+                ',' if !inQuotes -> { cells += current.toString(); current.setLength(0) }
                 else -> current.append(c)
             }
             i++

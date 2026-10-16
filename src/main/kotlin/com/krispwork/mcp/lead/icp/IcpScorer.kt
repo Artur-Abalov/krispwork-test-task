@@ -47,8 +47,7 @@ object IcpScorer {
             }
         }
 
-        val titleWords = title.split(Regex("[^a-z0-9]+")).filter { it.isNotEmpty() }
-        rules.titleKeywords.firstOrNull { kw -> if (' ' in kw) kw in title else kw in titleWords }?.let { kw ->
+        matchTitleKeyword(title, rules.titleKeywords)?.let { kw ->
             score += rules.titlePoints
             reasons += "title '${lead.title}' matches '$kw' +${rules.titlePoints}"
         }
@@ -69,5 +68,14 @@ object IcpScorer {
         }
 
         return IcpResult.Qualified(score, reasons, roleEmail, email)
+    }
+
+    /**
+     * First keyword that matches [title] (already lower-cased). Single-word keywords must match a whole word
+     * (so "it" does not match "Editor"); multi-word keywords match as a substring.
+     */
+    fun matchTitleKeyword(title: String, keywords: List<String>): String? {
+        val titleWords = title.split(Regex("[^a-z0-9]+")).filter { it.isNotEmpty() }
+        return keywords.firstOrNull { kw -> if (' ' in kw) kw in title else kw in titleWords }
     }
 }
